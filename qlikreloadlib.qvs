@@ -1,0 +1,139 @@
+/*
+Realiza carga de dados do objeto 'vsFuncao' com parâmetros 'vdDataI' e 'vdDataF'.
+
+Para cada mês entre o primeiro dia do mês de 'vdDataI e 'vdDataF', verifica se
+o arquivo 'vsFileName'_YYYY_MM.qvd existe e, se não existir, cria-o com o
+retorno de 'vsFuncao'.
+
+O parâmetro 'vnQtdMeses' indica quantos meses anteriores a 'vdDataF' serão sempre
+recarregados, mesmpo se o arquivo do respectivo mês existir. 'vnQtdMeses' deve
+ser não negativo.
+
+Os dados do mês ao qual vdDataF pertence sempre são recarregados.
+
+Ao término, um único arquivo QVD 'nome_arquivo.qvd' é criado, contendo
+todos os dados da carga envolvendo o período especificado.
+*/
+
+Sub CargaPeriodo(vsConnector, vsFuncao, vsBaseFileName, vdDataI, vdDataF, vnQtdMeses)
+
+    LIB CONNECT TO '$(vsConnector)';
+
+    Trace >> [INICIO] Carga $(vsFileName) de $(vdDataI) a $(vdDataF);
+
+    Let vdDataI_aux = Num(MonthStart(vdDataI));
+    Let vdDataCorte = AddMonths(MonthStart(vdDataF), -vnQtdMeses);
+
+    Do while vdDataI_aux <= vdDataF
+        
+        Let vdDataF_aux = AddMonths(vdDataI_aux, 1)-1;
+        Let vsTagPeriodo = Date(vdDataI_aux, 'YYYY_MM');
+        Let vsFileName = '$(vsBaseFileName)_$(vsTagPeriodo)';
+        Let vsFileNameQvd = '$(vsFileName).qvd';
+        Let vsFileNameTxt = '$(vsFileName).txt';
+        Let vbFileExists = if(FileSize('$(vsLibQvd)_datapieces/$(vsFileNameQvd)') > 0, -1, 0);  
+
+        If Not vbFileExists Or vdDataCorte <= $(vdDataI_aux) Then
+        
+            If vdDataF < vdDataF_aux Then
+                vdDataF_aux = vdDataF;
+            End If;
+            
+            Let vsMensagem = '>>> ' & Date(vdDataI_aux) & ' a ' & Date(vdDataF_aux)  & ': realizando carga...';
+            Trace $(vsMensagem);
+            Let vdDataI_aux =  Date(vdDataI_aux, 'DDMMYYYY');
+            Let vdDataF_aux =  Date(vdDataF_aux, 'DDMMYYYY');
+            Let vsPonteiro = 'CARGA_PERIODO_$(vsTagPeriodo)';
+
+        vsPonteiro:
+            NoConcatenate Load *;
+            Select * FROM TABLE ($(vsFuncao)(TO_DATE('$(vdDataI_aux)','DDMMYYYY'), TO_DATE('$(vdDataF_aux)','DDMMYYYY')));
+            Store vsPonteiro Into '$(vsLibQvd)_datapieces/$(vsFileNameQvd)' (qvd);
+            Store vsPonteiro INTO '$(vsLibTxt)_datapieces/$(vsFileNameTxt)' (txt, delimiter is ',');
+            Execute zip -m $(vsSrcPathTxtZip)_datapieces/$(vsFileNameTxt).zip $(vsDstPathTxtZip)_datapieces/$(vsFileNameTxt);
+            Execute cmd.exe /c echo _datapieces\$(vsFileName)>> $(vsPathLog)$(vsLogFile);
+            Drop Table vsPonteiro;
+        End If;
+
+        CARGA_COMPLETA:
+        Load * From [$(vsLibQvd)_datapieces/$(vsFileNameQvd)] (qvd);
+
+        Let vdDataI_aux =  Num(AddMonths(vdDataI_aux, 1));
+    Loop;
+
+    Store CARGA_COMPLETA into '$(vsLibQvd)$(vsFileName).qvd' (qvd);
+    Drop Table CARGA_COMPLETA;
+
+    Trace >> [FIM] Carga $(vsFileName) de $(vdDataI) a $(vdDataF);
+    
+End Sub
+
+Sub Carga (vsConnector, vsFuncao, vsFileName)
+
+    LIB CONNECT TO '$(vsConnector)';
+    
+    Let vsFileNameTxt = '$(vsFileName).txt';
+    Let vsFileNameQvd = '$(vsFileName).qvd';
+
+	CARGA:
+		NoConcatenate Load *;
+		Select * FROM TABLE ($(vsFuncao));
+        Store CARGA INTO '$(vsLibQvd)\$(vsFileNameQvd)' (qvd);
+        Store CARGA INTO '$(vsLibTxt)\$(vsFileNameTxt)' (txt, delimiter is ',');
+        Execute zip -m $(vsSrcPathTxtZip)$(vsFileNameTxt).zip $(vsDstPathTxtZip)$(vsFileNameTxt);
+        Execute cmd.exe /c echo $(vsFileName)>> $(vsPathLog)$(vsLogFile);
+    	Drop Table  CARGA;
+
+End Sub
+
+Sub CargaQuery (vsConnector, vsQuery, vsFileName)
+
+    LIB CONNECT TO '$(vsConnector)';
+
+    Let vsFileNameTxt = '$(vsFileName).txt';
+    Let vsFileNameQvd = '$(vsFileName).qvd';
+   
+    
+	CARGA:
+		NoConcatenate Load *;
+		Select $(vsQuery);
+        Store CARGA INTO '$(vsLibQvd)\$(vsFileNameQvd)' (qvd);
+        Store CARGA INTO '$(vsLibTxt)\$(vsFileNameTxt)' (txt, delimiter is ',');
+        Execute zip -m $(vsSrcPathTxtZip)$(vsFileNameTxt).zip $(vsDstPathTxtZip)$(vsFileNameTxt);
+        Execute cmd.exe /c echo $(vsFileName)>> $(vsPathLog)$(vsLogFile);
+    	Drop Table  CARGA;
+
+End Sub
+
+
+Sub LoadPkg (connector, pkg_name, owner, start_date, finish_date)
+
+    Execute cmd.exe /c del $(vsPathLog)$(vsLogFile);
+
+    LIB CONNECT TO '$(connector)';
+
+    TABLE:
+     NoConcatenate LOAD *;
+     select object_name, decode(count(*) - 2, 0, 0, 1) has_param
+       from all_arguments
+      where package_name = '$(pkg_name)'
+        and owner = '$(owner)'
+        and object_name like 'FN_%'
+      group by object_name
+      order by 2 asc;
+
+    Let vNoOfRows = NoOfRows('TABLE');
+
+    FOR i=0 to $(vNoOfRows)-1
+      Let object = Peek('OBJECT_NAME', i, 'TABLE');
+      Let filename = MID(object, 4); // Trim first 3 characters.
+      Let possui_parametro = Peek('HAS_PARAM', i, 'TABLE');
+
+      If possui_parametro Then
+        Call CargaPeriodo('$(connector)', '$(owner).$(pkg_name).$(object)', '$(filename)', '$(start_date)',  '$(finish_date)', 1);
+      Else
+        Call Carga('$(connector)', '$(owner).$(pkg_name).$(object)', '$(filename)');
+      End if;
+
+    NEXT i;
+End Sub;
